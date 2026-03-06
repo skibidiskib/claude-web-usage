@@ -523,7 +523,9 @@ echo '{"model":{"display_name":"Opus 4.6"},"context_window":{"used_percentage":5
 
 ## Screenshots
 
-> Screenshots will be added soon showing the statusline in action across multiple Claude Code sessions.
+Claude Code status bar showing real-time usage data from the web API:
+
+![Claude Code Status Bar](screenshots/cc-status.jpg)
 
 ---
 
