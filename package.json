@@ -1,0 +1,43 @@
+{
+  "name": "claude-web-usage",
+  "version": "1.0.0",
+  "description": "Reliable Claude Code usage monitoring via Claude Desktop's web session cookies. Bypasses OAuth API rate limiting with multiple sessions.",
+  "bin": {
+    "claude-web-usage": "./combined-statusline.js"
+  },
+  "files": [
+    "combined-statusline.js",
+    "web-usage-fetch.js",
+    "debug-cookies.js",
+    "README.md",
+    "TROUBLESHOOTING.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "echo '{\"model\":{\"display_name\":\"Test\"},\"context_window\":{\"used_percentage\":50,\"context_window_size\":200000}}' | node combined-statusline.js",
+    "test:cookies": "node debug-cookies.js",
+    "test:api": "node web-usage-fetch.js"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "statusline",
+    "usage",
+    "rate-limit",
+    "monitoring",
+    "cli"
+  ],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/skibidiskib/claude-web-usage.git"
+  },
+  "homepage": "https://github.com/skibidiskib/claude-web-usage#readme",
+  "os": [
+    "darwin"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
