@@ -45,6 +45,7 @@ function decryptCookie(encryptedBuffer) {
 }
 
 function getCookie(name) {
+  if (!/^[A-Za-z0-9_]+$/.test(name)) throw new Error(`invalid cookie name: ${name}`);
   const sql = `SELECT hex(encrypted_value) FROM cookies WHERE host_key = '.claude.ai' AND name = '${name}' LIMIT 1;`;
   const hex = execSync(`sqlite3 '${COOKIE_DB}' "${sql}"`, { encoding: 'utf8' }).trim();
   if (!hex) throw new Error(`Cookie '${name}' not found`);

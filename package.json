@@ -1,6 +1,6 @@
 {
   "name": "claude-web-usage",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Reliable Claude Code usage monitoring via Claude Desktop's web session cookies. Bypasses OAuth API rate limiting with multiple sessions.",
   "bin": {
     "claude-web-usage": "./combined-statusline.js"

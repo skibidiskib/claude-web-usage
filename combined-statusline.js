@@ -1,13 +1,5 @@
 #!/usr/bin/env node
 
-// claude-web-usage: combined-statusline.js
-// Main statusline script for Claude Code status bar.
-// Reads session JSON from stdin, decrypts Claude Desktop cookies,
-// calls claude.ai web API for usage data, and outputs a 3-line emoji format.
-//
-// Usage: Configured in ~/.claude/settings.json as statusLine.command
-// No npm dependencies — uses only Node.js built-in modules.
-
 const crypto = require('crypto');
 const { execSync, spawn } = require('child_process');
 const https = require('https');
@@ -15,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-// Global safety timeout — kill the process if it hangs
+// Global safety timeout
 let scriptCompleted = false;
 setTimeout(() => { if (!scriptCompleted) process.exit(1); }, 10000);
 
@@ -25,6 +17,7 @@ const API_CACHE = path.join(CACHE_DIR, 'ccstatusline-api.json');
 const API_LOCK = path.join(CACHE_DIR, 'ccstatusline-api.lock');
 const CACHE_MAX_AGE = 30;  // seconds
 const LOCK_MAX_AGE = 15;   // seconds
+const STALE_THRESHOLD = 300; // seconds — flag cache as stale if older than 5 min
 
 // === Cookie decryption for Claude Desktop web API ===
 const COOKIE_DB = os.homedir() + '/Library/Application Support/Claude/Cookies';
@@ -40,6 +33,7 @@ function getEncKey() {
 }
 
 function decryptCookie(name) {
+  if (!/^[A-Za-z0-9_]+$/.test(name)) throw new Error(`invalid cookie name: ${name}`);
   const sql = `SELECT hex(encrypted_value) FROM cookies WHERE host_key = '.claude.ai' AND name = '${name}' LIMIT 1;`;
   const hex = execSync(`sqlite3 '${COOKIE_DB}' "${sql}"`, { encoding: 'utf8' }).trim();
   if (!hex) return null;
@@ -83,7 +77,10 @@ function fetchWebUsage() {
             const parsed = JSON.parse(data);
             const result = {};
             if (parsed.five_hour) { result.sessionUsage = parsed.five_hour.utilization; result.sessionResetAt = parsed.five_hour.resets_at; }
-            if (parsed.seven_day) { result.weeklyUsage = parsed.seven_day.utilization; }
+            if (parsed.seven_day) {
+              result.weeklyUsage = parsed.seven_day.utilization;
+              if (parsed.seven_day.resets_at) result.weeklyResetAt = parsed.seven_day.resets_at;
+            }
             if (result.sessionUsage !== undefined || result.weeklyUsage !== undefined) resolve(result);
             else resolve(null);
           } catch { resolve(null); }
@@ -97,22 +94,30 @@ function fetchWebUsage() {
 }
 
 // === Get API usage with caching ===
+// Returns the usage object, with `_stale = true` attached when serving cached
+// data older than STALE_THRESHOLD so callers can flag it in the UI.
 async function getApiUsage() {
   const now = Math.floor(Date.now() / 1000);
 
   // Read existing cache
   let cached = null;
+  let cachedAge = Infinity;
   try {
     const stat = fs.statSync(API_CACHE);
-    const fileAge = now - Math.floor(stat.mtimeMs / 1000);
+    cachedAge = now - Math.floor(stat.mtimeMs / 1000);
     cached = JSON.parse(fs.readFileSync(API_CACHE, 'utf8'));
-    if (fileAge < CACHE_MAX_AGE && !cached.error) return cached;
+    if (cachedAge < CACHE_MAX_AGE && !cached.error) return cached;
   } catch {}
+
+  const flagStale = (obj) => {
+    if (!obj || cachedAge < STALE_THRESHOLD) return obj;
+    return { ...obj, _stale: true };
+  };
 
   // Check lock
   try {
     const lockAge = now - Math.floor(fs.statSync(API_LOCK).mtimeMs / 1000);
-    if (lockAge < LOCK_MAX_AGE) return cached;
+    if (lockAge < LOCK_MAX_AGE) return flagStale(cached);
   } catch {}
 
   // Touch lock
@@ -128,29 +133,39 @@ async function getApiUsage() {
     return webData;
   }
 
-  return cached;
+  return flagStale(cached);
 }
 
-// === Weekly Cost Cache (via ccusage CLI tool) ===
+// === Weekly Cost Cache ===
 const WEEKLY_COST_CACHE = '/tmp/ccusage-weekly-cost.json';
 const WEEKLY_COST_LOCK = '/tmp/ccusage-weekly-cost.lock';
+
+// Fallback only — used when the API doesn't supply seven_day.resets_at.
+// Anthropic's weekly limit is a rolling 7-day window from first prompt, so the
+// reset day shifts over time. Update this constant when the rolling window
+// drifts; the API value (api.weeklyResetAt) is preferred whenever available.
+// Currently observed: Monday 5pm BKK = Monday 10:00 UTC (dayUTC=1, hourUTC=10).
+const WEEKLY_RESET_DAY_UTC = 1;
+const WEEKLY_RESET_HOUR_UTC = 10;
 
 function getWeeklyResetDate() {
   const now = new Date();
   const dayUTC = now.getUTCDay(), hourUTC = now.getUTCHours();
-  const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 3, 0, 0));
-  if (dayUTC === 5 && hourUTC >= 3) next.setUTCDate(next.getUTCDate() + 7);
-  else if (dayUTC !== 5) { let d = (5 - dayUTC + 7) % 7; if (d === 0) d = 7; next.setUTCDate(next.getUTCDate() + d); }
+  const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), WEEKLY_RESET_HOUR_UTC, 0, 0));
+  if (dayUTC === WEEKLY_RESET_DAY_UTC && hourUTC >= WEEKLY_RESET_HOUR_UTC) next.setUTCDate(next.getUTCDate() + 7);
+  else if (dayUTC !== WEEKLY_RESET_DAY_UTC) { let d = (WEEKLY_RESET_DAY_UTC - dayUTC + 7) % 7; if (d === 0) d = 7; next.setUTCDate(next.getUTCDate() + d); }
   return next;
 }
 
 function getWeeklySinceDate() {
   const now = new Date();
   const dayUTC = now.getUTCDay(), hourUTC = now.getUTCHours();
-  const last = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 3, 0, 0));
-  if (dayUTC === 5 && hourUTC < 3) last.setUTCDate(last.getUTCDate() - 7);
-  else if (dayUTC !== 5) { let d = (dayUTC - 5 + 7) % 7; if (d === 0) d = 7; last.setUTCDate(last.getUTCDate() - d); }
-  return last.toISOString().slice(0, 10).replace(/-/g, '');
+  const last = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), WEEKLY_RESET_HOUR_UTC, 0, 0));
+  if (dayUTC === WEEKLY_RESET_DAY_UTC && hourUTC < WEEKLY_RESET_HOUR_UTC) last.setUTCDate(last.getUTCDate() - 7);
+  else if (dayUTC !== WEEKLY_RESET_DAY_UTC) { let d = (dayUTC - WEEKLY_RESET_DAY_UTC + 7) % 7; if (d === 0) d = 7; last.setUTCDate(last.getUTCDate() - d); }
+  // Shift +7h to BKK date (ccusage interprets --since in local/BKK timezone)
+  const bkk = new Date(last.getTime() + 7 * 3600 * 1000);
+  return bkk.toISOString().slice(0, 10).replace(/-/g, '');
 }
 
 function getWeeklyCost() {
@@ -223,21 +238,26 @@ async function main() {
   const costStr = weeklyCost !== null ? `$${weeklyCost.toFixed(2)}` : '$-';
   let weeklyLine = 'unavailable';
   if (api?.weeklyUsage !== undefined) {
-    const weeklyResetMs = getWeeklyResetDate().getTime() - Date.now();
-    weeklyLine = `${api.weeklyUsage.toFixed(1)}% / ${costStr} | (${formatTimeLeft(weeklyResetMs)})`;
+    // Prefer API-supplied reset time; fall back to hardcoded weekly schedule.
+    const resetMs = api.weeklyResetAt
+      ? new Date(api.weeklyResetAt).getTime() - Date.now()
+      : getWeeklyResetDate().getTime() - Date.now();
+    weeklyLine = `${api.weeklyUsage.toFixed(1)}% / ${costStr} | (${formatTimeLeft(resetMs)})`;
   } else {
     weeklyLine = `- / ${costStr} | (-)`;
   }
 
+  // Yellow circle when serving stale cache (>5 min old), green otherwise.
+  const weeklyEmoji = api?._stale ? '🟡' : '🟢';
   console.log([
-    `\u{1F680} ${model}${gitBranch}`,
-    `\u2705 ${contextTokens} (${contextPct}%) | ${blockPercent}% (${blockTime})`,
-    `\u{1F7E2} ${weeklyLine}`
+    `🚀 ${model}${gitBranch}`,
+    `✅ ${contextTokens} (${contextPct}%) | ${blockPercent}% (${blockTime})`,
+    `${weeklyEmoji} ${weeklyLine}`
   ].join('\n'));
   scriptCompleted = true;
 }
 
 main().catch(() => {
-  console.log('\u{1F680} Unknown\n\u2705 - (-%) | -% (-)\n\u{1F7E2} unavailable');
+  console.log('🚀 Unknown\n✅ - (-%) | -% (-)\n🟢 unavailable');
   scriptCompleted = true;
 });

@@ -15,6 +15,7 @@ const key = crypto.pbkdf2Sync(pw, 'saltysalt', 1003, 16, 'sha1');
 const COOKIE_DB = process.env.HOME + '/Library/Application Support/Claude/Cookies';
 
 function getHex(name) {
+  if (!/^[A-Za-z0-9_]+$/.test(name)) throw new Error(`invalid cookie name: ${name}`);
   const sql = `SELECT hex(encrypted_value) FROM cookies WHERE host_key = '.claude.ai' AND name = '${name}' LIMIT 1;`;
   return execSync(`sqlite3 '${COOKIE_DB}' "${sql}"`, { encoding: 'utf8' }).trim();
 }
