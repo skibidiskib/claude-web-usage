@@ -81,6 +81,16 @@ function fetchWebUsage() {
               result.weeklyUsage = parsed.seven_day.utilization;
               if (parsed.seven_day.resets_at) result.weeklyResetAt = parsed.seven_day.resets_at;
             }
+            // Per-model weekly windows live in `limits[]` as kind="weekly_scoped"
+            // entries carrying scope.model.display_name (e.g. "Fable"). The
+            // top-level seven_day_* keys are usually null, so limits[] is the
+            // only reliable source. `percent` is already 0-100.
+            try {
+              const scoped = (parsed.limits || []).find((l) =>
+                l && l.kind === 'weekly_scoped' &&
+                /fable/i.test(l.scope?.model?.display_name || ''));
+              if (scoped && typeof scoped.percent === 'number') result.fableUsage = scoped.percent;
+            } catch {}
             if (result.sessionUsage !== undefined || result.weeklyUsage !== undefined) resolve(result);
             else resolve(null);
           } catch { resolve(null); }
@@ -157,18 +167,24 @@ function getWeeklyResetDate() {
   return next;
 }
 
-function getWeeklySinceDate() {
+// Start instant of the CURRENT weekly window (the most recent reset moment).
+// Prefer the API's next-reset time (window start = next reset - 7 days) so the
+// $ window matches the % utilization window exactly; otherwise fall back to the
+// hardcoded Monday 10:00 UTC (= Monday 17:00 BKK) schedule.
+function getWeeklyResetStart(apiWeeklyResetAt) {
+  if (apiWeeklyResetAt) {
+    const next = new Date(apiWeeklyResetAt).getTime();
+    if (!isNaN(next)) return new Date(next - 7 * 24 * 3600 * 1000);
+  }
   const now = new Date();
   const dayUTC = now.getUTCDay(), hourUTC = now.getUTCHours();
   const last = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), WEEKLY_RESET_HOUR_UTC, 0, 0));
   if (dayUTC === WEEKLY_RESET_DAY_UTC && hourUTC < WEEKLY_RESET_HOUR_UTC) last.setUTCDate(last.getUTCDate() - 7);
   else if (dayUTC !== WEEKLY_RESET_DAY_UTC) { let d = (dayUTC - WEEKLY_RESET_DAY_UTC + 7) % 7; if (d === 0) d = 7; last.setUTCDate(last.getUTCDate() - d); }
-  // Shift +7h to BKK date (ccusage interprets --since in local/BKK timezone)
-  const bkk = new Date(last.getTime() + 7 * 3600 * 1000);
-  return bkk.toISOString().slice(0, 10).replace(/-/g, '');
+  return last;
 }
 
-function getWeeklyCost() {
+function getWeeklyCost(resetStartISO) {
   let cost = null;
   try {
     const cached = JSON.parse(fs.readFileSync(WEEKLY_COST_CACHE, 'utf8'));
@@ -176,17 +192,27 @@ function getWeeklyCost() {
     if (Date.now() - cached.timestamp < 5 * 60 * 1000) return cost;
   } catch {}
   try { if (Date.now() - fs.statSync(WEEKLY_COST_LOCK).mtimeMs < 60000) return cost; } catch {}
-  const sinceDate = getWeeklySinceDate();
-  const untilDate = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  // Sum the 5-hour billing blocks whose START is on/after the weekly reset
+  // instant. `ccusage daily` only filters by calendar date, which over-counted
+  // the whole reset day (e.g. all of Monday before the 17:00 BKK reset — last
+  // week's usage). Blocks give hour precision so the $ matches the % window.
+  // A block straddling the reset instant is attributed by its start, a bounded
+  // <=1-block edge effect in the first hours after reset.
   const script = `
     const { execSync } = require('child_process');
     const fs = require('fs');
     try {
       fs.writeFileSync('${WEEKLY_COST_LOCK}', String(process.pid));
-      const stdout = execSync('ccusage daily -s ${sinceDate} -u ${untilDate} -j 2>/dev/null', { timeout: 60000 });
+      const resetStart = new Date('${resetStartISO}').getTime();
+      const stdout = execSync('ccusage blocks -j 2>/dev/null', { timeout: 60000, maxBuffer: 64 * 1024 * 1024 });
       const data = JSON.parse(stdout);
       let totalCost = 0;
-      if (data && Array.isArray(data.daily)) { for (const day of data.daily) totalCost += day.totalCost || 0; }
+      if (data && Array.isArray(data.blocks)) {
+        for (const b of data.blocks) {
+          if (b.isGap || !b.startTime) continue;
+          if (new Date(b.startTime).getTime() >= resetStart) totalCost += b.costUSD || 0;
+        }
+      }
       fs.writeFileSync('${WEEKLY_COST_CACHE}', JSON.stringify({ cost: totalCost, timestamp: Date.now() }));
     } catch (e) {}
     try { fs.unlinkSync('${WEEKLY_COST_LOCK}'); } catch (e) {}
@@ -213,6 +239,12 @@ async function main() {
   const sessionObj = JSON.parse(Buffer.concat(chunks).toString());
 
   const model = sessionObj.model?.display_name || 'Unknown';
+  // Show the raw effort level verbatim so it matches the /effort picker: low|medium|high|xhigh|max.
+  // NOTE: the `ultracode` stop (above max) is NOT distinguishable here. Claude Code reports
+  // effort.level="xhigh" for BOTH xhigh and ultracode (ultracode = xhigh + workflows) and exposes
+  // no ultracode flag to the statusLine payload OR the CLAUDE_EFFORT env var, so ultracode shows "xhigh".
+  const effortLevel = sessionObj.effort?.level;
+  const effortStr = effortLevel ? ` ${effortLevel}` : '';
 
   let gitBranch = '';
   try {
@@ -234,23 +266,27 @@ async function main() {
   if (api?.sessionUsage !== undefined) blockPercent = api.sessionUsage.toFixed(0);
   if (api?.sessionResetAt) blockTime = formatTimeLeft(new Date(api.sessionResetAt).getTime() - Date.now());
 
-  const weeklyCost = getWeeklyCost();
+  const weeklyWindowStart = getWeeklyResetStart(api?.weeklyResetAt);
+  const weeklyCost = getWeeklyCost(weeklyWindowStart.toISOString());
   const costStr = weeklyCost !== null ? `$${weeklyCost.toFixed(2)}` : '$-';
+  // Fable's own weekly window, shown as "Fable x.x%". Omitted entirely when the
+  // API doesn't report a Fable-scoped limit (e.g. older cached payloads).
+  const fableStr = api?.fableUsage !== undefined ? `Fable ${api.fableUsage.toFixed(1)}% / ` : '';
   let weeklyLine = 'unavailable';
   if (api?.weeklyUsage !== undefined) {
     // Prefer API-supplied reset time; fall back to hardcoded weekly schedule.
     const resetMs = api.weeklyResetAt
       ? new Date(api.weeklyResetAt).getTime() - Date.now()
       : getWeeklyResetDate().getTime() - Date.now();
-    weeklyLine = `${api.weeklyUsage.toFixed(1)}% / ${costStr} | (${formatTimeLeft(resetMs)})`;
+    weeklyLine = `${api.weeklyUsage.toFixed(1)}% / ${fableStr}${costStr} | (${formatTimeLeft(resetMs)})`;
   } else {
-    weeklyLine = `- / ${costStr} | (-)`;
+    weeklyLine = `- / ${fableStr}${costStr} | (-)`;
   }
 
   // Yellow circle when serving stale cache (>5 min old), green otherwise.
   const weeklyEmoji = api?._stale ? '🟡' : '🟢';
   console.log([
-    `🚀 ${model}${gitBranch}`,
+    `🚀 ${model}${effortStr}${gitBranch}`,
     `✅ ${contextTokens} (${contextPct}%) | ${blockPercent}% (${blockTime})`,
     `${weeklyEmoji} ${weeklyLine}`
   ].join('\n'));

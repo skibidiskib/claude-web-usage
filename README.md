@@ -52,22 +52,24 @@ The cookies are extracted and decrypted directly from Claude Desktop's local SQL
 The script produces a 3-line status bar in Claude Code:
 
 ```
-🚀 Opus 4.6 [main]
+🚀 Opus 4.8 high [main]
 ✅ 102K (51%) | 28% (1h 34m left)
-🟢 67.0% / $852.30 | (5d 18h 26m left)
+🟢 67.0% / Fable 12.0% / $852.30 | (5d 18h 26m left)
 ```
 
 | Line | Content | Source |
 |------|---------|--------|
-| **Line 1** | Model name + git branch | Claude Code session JSON + `git rev-parse` |
+| **Line 1** | Model name + reasoning effort + git branch | Claude Code session JSON + `git rev-parse` |
 | **Line 2** | Context window (tokens, %) \| 5-hour block (%, countdown) | Session JSON + Web API |
-| **Line 3** | Weekly utilization (%) / cost ($) \| weekly reset countdown | Web API + ccusage CLI |
+| **Line 3** | Weekly utilization (%) / per-model window (%) / cost ($) \| weekly reset countdown | Web API + ccusage CLI |
 
 ### Reading the status bar
 
+- **`Opus 4.8 high`** — Active model and reasoning effort (`low`/`medium`/`high`/`xhigh`/`max`)
 - **`102K (51%)`** — You've used 102,000 tokens, which is 51% of your 200K context window
 - **`28% (1h 34m left)`** — You've used 28% of your 5-hour rate limit block; it resets in 1h 34m
-- **`67.0%`** — You've used 67% of your weekly rate limit
+- **`67.0%`** — You've used 67% of your weekly rate limit (all models)
+- **`Fable 12.0%`** — You've used 12% of the separate weekly window Anthropic scopes to Fable. Hidden when your account has no model-scoped limit
 - **`$852.30`** — Your estimated cost this week (requires [ccusage](https://github.com/ryoppippi/ccusage))
 - **`(5d 18h 26m left)`** — Your weekly rate limit resets in ~6 days
 
@@ -174,6 +176,10 @@ npm install -g ccusage
 
 The cost is calculated in a background process and cached for 5 minutes.
 
+Costs are summed from `ccusage blocks -j`, counting every 5-hour billing block whose **start** falls on or after the current weekly reset instant. The reset instant is derived from the API's own `seven_day.resets_at` (minus 7 days), so the `$` figure covers exactly the same window as the `%` figure. Earlier versions used `ccusage daily`, which filters by calendar date only and therefore counted the entire reset day — including the hours that belonged to the *previous* week.
+
+> A block straddling the reset instant is attributed to the window it started in. That is a bounded, at-most-one-block discrepancy in the first hours after a reset.
+
 ---
 
 ## Architecture
@@ -205,7 +211,7 @@ The cost is calculated in a background process and cached for 5 minutes.
 │                     │     └─ ~/.cache/ccstatusline-api.lock (15s)       │
 │                     │                                                    │
 │                     └──→ Weekly Cost (background spawn)                  │
-│                           └─ ccusage daily -s YYYYMMDD -u YYYYMMDD -j   │
+│                           └─ ccusage blocks -j, summed from reset instant│
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -354,7 +360,13 @@ This is because Cloudflare's bot detection compares TLS fingerprints. A child pr
     "monthly_limit": null,
     "used_credits": null,
     "utilization": null
-  }
+  },
+  "limits": [
+    { "kind": "session",       "group": "session", "percent": 28, "resets_at": "...", "scope": null },
+    { "kind": "weekly_all",    "group": "weekly",  "percent": 67, "resets_at": "...", "scope": null },
+    { "kind": "weekly_scoped", "group": "weekly",  "percent": 12, "resets_at": "...",
+      "scope": { "model": { "id": null, "display_name": "Fable" }, "surface": null } }
+  ]
 }
 ```
 
@@ -364,9 +376,22 @@ This is because Cloudflare's bot detection compares TLS fingerprints. A child pr
 | `five_hour.resets_at` | ISO timestamp when the 5-hour block resets |
 | `seven_day.utilization` | Current 7-day rolling usage (0-100%) |
 | `seven_day.resets_at` | ISO timestamp when the weekly window resets |
-| `seven_day_sonnet` | Separate Sonnet model usage (if applicable) |
-| `seven_day_opus` | Separate Opus model usage (if applicable) |
+| `seven_day_sonnet` | Separate Sonnet model usage (usually `null`) |
+| `seven_day_opus` | Separate Opus model usage (usually `null`) |
 | `extra_usage` | Extra usage/overuse billing info |
+| `limits[]` | Flat list of every active window, including per-model ones |
+
+### Per-model windows (`limits[]`)
+
+The `seven_day_*` keys are legacy and are `null` on most accounts. The live per-model numbers arrive in the `limits[]` array instead:
+
+- `kind: "session"` — mirrors `five_hour`
+- `kind: "weekly_all"` — mirrors `seven_day`
+- `kind: "weekly_scoped"` — a model-specific weekly window, identified by `scope.model.display_name` (e.g. `"Fable"`)
+
+`percent` is already on a 0-100 scale, the same as `utilization`. This script reads the `weekly_scoped` entry whose `scope.model.display_name` matches `/fable/i` and renders it as `Fable x.x%`.
+
+> ⚠️ `limits[]` is undocumented and unversioned. If Anthropic renames or drops it, the `Fable` segment simply disappears from the status bar — nothing else breaks.
 
 ---
 
