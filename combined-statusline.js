@@ -222,6 +222,89 @@ function getWeeklyCost(resetStartISO) {
   return cost;
 }
 
+// === Prompt-cache freshness (derived locally — no API exposes this) ===
+// Anthropic bills a cached prefix with a TTL that RESTARTS on every use (read or
+// write), so "cache still warm" == "time since the last API turn < TTL". Neither
+// the statusLine payload nor /api/organizations/*/usage reports cache state, so
+// the only source of truth is this session's transcript: each assistant record
+// carries message.usage with cache_read/cache_creation counts and a timestamp.
+// NOTE: the file's mtime is useless here — open sessions get touched ~hourly with
+// zero bytes written (see fix-session-mtimes.py), so always read a real record.
+const CACHE_TAIL_BYTES = 256 * 1024; // transcripts reach 40MB; only the tail matters
+
+function readTailLines(file, bytes) {
+  let fd;
+  try {
+    const size = fs.statSync(file).size;
+    const start = Math.max(0, size - bytes);
+    const len = size - start;
+    if (len <= 0) return [];
+    const buf = Buffer.alloc(len);
+    fd = fs.openSync(file, 'r');
+    fs.readSync(fd, buf, 0, len, start);
+    const lines = buf.toString('utf8').split('\n');
+    if (start > 0) lines.shift(); // first line is a fragment
+    return lines;
+  } catch { return []; }
+  finally { try { if (fd !== undefined) fs.closeSync(fd); } catch {} }
+}
+
+// Returns { ts, ttlMin } — ts = last main-thread API turn that touched the cache,
+// ttlMin = 60 or 5 read from the most recent cache_creation breakdown (null when
+// the tail shows no cache write at all, e.g. a brand-new session).
+function getCacheState(transcriptPath) {
+  if (!transcriptPath) return null;
+  const lines = readTailLines(transcriptPath, CACHE_TAIL_BYTES);
+  let ts = null, ttlMin = null;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (!line || line.charCodeAt(0) !== 123 /* { */) continue;
+    let rec;
+    try { rec = JSON.parse(line); } catch { continue; }
+    // Subagent turns share the file but cache a different prefix — never let one
+    // masquerade as a refresh of the main thread's cache.
+    if (rec.isSidechain === true) continue;
+    const u = rec.message?.usage;
+    if (!u) continue;
+    const touched = (u.cache_read_input_tokens || 0) > 0 || (u.cache_creation_input_tokens || 0) > 0;
+    if (ts === null && touched && rec.timestamp) {
+      const t = new Date(rec.timestamp).getTime();
+      if (!isNaN(t)) ts = t;
+    }
+    if (ttlMin === null) {
+      const cc = u.cache_creation;
+      if (cc) {
+        if ((cc.ephemeral_1h_input_tokens || 0) > 0) ttlMin = 60;
+        else if ((cc.ephemeral_5m_input_tokens || 0) > 0) ttlMin = 5;
+      }
+    }
+    if (ts !== null && ttlMin !== null) break;
+  }
+  return ts === null ? null : { ts, ttlMin };
+}
+
+// Renders just the last-touch clock time in Bangkok. The TTL is still read from
+// the transcript, but only to pick the emoji: 🧊 = prefix still warm, 💧 = the
+// window has lapsed and the next turn pays full price again.
+// Clock zone for that timestamp: the machine's local zone unless
+// CLAUDE_STATUSLINE_TZ names an IANA zone (e.g. "Asia/Bangkok").
+const CACHE_TZ = process.env.CLAUDE_STATUSLINE_TZ || undefined;
+
+function formatCacheSegment(state) {
+  if (!state) return '';
+  // en-GB is deliberate, not the machine locale: a fixed 24-hour HH:MM is the
+  // most compact form and keeps the statusline width stable everywhere.
+  const clock = new Date(state.ts).toLocaleTimeString('en-GB', {
+    ...(CACHE_TZ ? { timeZone: CACHE_TZ } : {}),
+    hour: '2-digit', minute: '2-digit'
+  });
+  // Unknown TTL (cache reads in the tail but no write to read the breakdown from)
+  // falls back to 60 — the longest TTL in use — so an hours-idle session goes cold
+  // rather than showing a warm cache forever.
+  const warm = (Date.now() - state.ts) < (state.ttlMin || 60) * 60 * 1000;
+  return ` | ${warm ? '🧊' : '💧'} cache last used: ${clock}`;
+}
+
 // === Format time remaining ===
 function formatTimeLeft(ms) {
   if (ms <= 0) return '0h 0m left';
@@ -261,6 +344,8 @@ async function main() {
     contextPct = Math.round(ctxPercent);
   }
 
+  const cacheStr = formatCacheSegment(getCacheState(sessionObj.transcript_path));
+
   const api = await getApiUsage();
   let blockPercent = '-', blockTime = '-';
   if (api?.sessionUsage !== undefined) blockPercent = api.sessionUsage.toFixed(0);
@@ -287,7 +372,7 @@ async function main() {
   const weeklyEmoji = api?._stale ? '🟡' : '🟢';
   console.log([
     `🚀 ${model}${effortStr}${gitBranch}`,
-    `✅ ${contextTokens} (${contextPct}%) | ${blockPercent}% (${blockTime})`,
+    `✅ ${contextTokens} (${contextPct}%) | ${blockPercent}% (${blockTime})${cacheStr}`,
     `${weeklyEmoji} ${weeklyLine}`
   ].join('\n'));
   scriptCompleted = true;

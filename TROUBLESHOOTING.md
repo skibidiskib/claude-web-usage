@@ -187,7 +187,7 @@ rm -f ~/.cache/ccstatusline-api.lock
 
 **Fix:**
 1. Install ccusage: `npm install -g ccusage`
-2. Verify it works: `ccusage daily -j`
+2. Verify it works: `ccusage blocks -j`
 3. Wait up to 60 seconds for the background calculation to complete
 4. The cost will appear on the next statusline refresh
 
@@ -196,7 +196,7 @@ rm -f ~/.cache/ccstatusline-api.lock
 **Cause:** ccusage may not have data for the current billing period, or its data source is out of sync.
 
 **Fix:**
-1. Check ccusage directly: `ccusage daily -j`
+1. Check ccusage directly: `ccusage blocks -j`
 2. Clear the cost cache: `rm -f /tmp/ccusage-weekly-cost.json /tmp/ccusage-weekly-cost.lock`
 3. The background process will recalculate on the next invocation
 
