@@ -283,8 +283,8 @@ function getCacheState(transcriptPath) {
   return ts === null ? null : { ts, ttlMin };
 }
 
-// Renders just the last-touch clock time in Bangkok. The TTL is still read from
-// the transcript, but only to pick the emoji: 🧊 = prefix still warm, 💧 = the
+// Renders the last-touch clock time and date. The TTL is still read from the
+// transcript, but only to pick the emoji: 🧊 = prefix still warm, 💧 = the
 // window has lapsed and the next turn pays full price again.
 // Clock zone for that timestamp: the machine's local zone unless
 // CLAUDE_STATUSLINE_TZ names an IANA zone (e.g. "Asia/Bangkok").
@@ -292,17 +292,20 @@ const CACHE_TZ = process.env.CLAUDE_STATUSLINE_TZ || undefined;
 
 function formatCacheSegment(state) {
   if (!state) return '';
+  const when = new Date(state.ts);
+  const tz = CACHE_TZ ? { timeZone: CACHE_TZ } : {};
   // en-GB is deliberate, not the machine locale: a fixed 24-hour HH:MM is the
   // most compact form and keeps the statusline width stable everywhere.
-  const clock = new Date(state.ts).toLocaleTimeString('en-GB', {
-    ...(CACHE_TZ ? { timeZone: CACHE_TZ } : {}),
-    hour: '2-digit', minute: '2-digit'
-  });
+  const clock = when.toLocaleTimeString('en-GB', { ...tz, hour: '2-digit', minute: '2-digit' });
+  // The date is what tells a resumed session apart from a live one: a bare clock
+  // reads as "today" even when the last turn was days ago. Rendered in the same
+  // zone as the clock, or the two could disagree across a midnight boundary.
+  const date = when.toLocaleDateString('en-US', { ...tz, weekday: 'short', month: 'short', day: 'numeric' });
   // Unknown TTL (cache reads in the tail but no write to read the breakdown from)
   // falls back to 60 — the longest TTL in use — so an hours-idle session goes cold
   // rather than showing a warm cache forever.
   const warm = (Date.now() - state.ts) < (state.ttlMin || 60) * 60 * 1000;
-  return ` | ${warm ? '🧊' : '💧'} cache last used: ${clock}`;
+  return ` | ${warm ? '🧊' : '💧'} cache last used: ${clock} - ${date}`;
 }
 
 // === Format time remaining ===

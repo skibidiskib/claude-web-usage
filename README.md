@@ -53,7 +53,7 @@ The script produces a 3-line status bar in Claude Code:
 
 ```
 🚀 Opus 4.8 high [main]
-✅ 102K (51%) | 28% (1h 34m left) | 🧊 cache last used: 19:54
+✅ 102K (51%) | 28% (1h 34m left) | 🧊 cache last used: 19:54 - Sat, Aug 8
 🟢 67.0% / Fable 12.0% / $852.30 | (5d 18h 26m left)
 ```
 
@@ -68,7 +68,7 @@ The script produces a 3-line status bar in Claude Code:
 - **`Opus 4.8 high`** — Active model and reasoning effort (`low`/`medium`/`high`/`xhigh`/`max`)
 - **`102K (51%)`** — You've used 102,000 tokens, which is 51% of your 200K context window
 - **`28% (1h 34m left)`** — You've used 28% of your 5-hour rate limit block; it resets in 1h 34m
-- **`🧊 cache last used: 19:54`** — The last time this session touched its prompt cache. 🧊 = the cached prefix is still inside its TTL, so the next turn re-uses it; 💧 = the window lapsed and the next turn re-caches at full price. See [Prompt-cache freshness](#prompt-cache-freshness)
+- **`🧊 cache last used: 19:54 - Sat, Aug 8`** — When this session last touched its prompt cache. 🧊 = the cached prefix is still inside its TTL, so the next turn re-uses it; 💧 = the window lapsed and the next turn re-caches at full price. The date is there because a resumed session can show a last touch from days ago. See [Prompt-cache freshness](#prompt-cache-freshness)
 - **`67.0%`** — You've used 67% of your weekly rate limit (all models)
 - **`Fable 12.0%`** — You've used 12% of the separate weekly window Anthropic scopes to Fable. Hidden when your account has no model-scoped limit
 - **`$852.30`** — Your estimated cost this week (requires [ccusage](https://github.com/ryoppippi/ccusage))
@@ -528,7 +528,7 @@ At most once every 30 seconds (controlled by `CACHE_MAX_AGE`). The lock file pre
 
 ### What does `🧊 cache last used` mean, and does it cost anything to show?
 
-It is the clock time of the last turn in **this** session that read or wrote the prompt cache, so you can tell at a glance whether your next message still rides the cached prefix. 🧊 means the TTL has not lapsed, 💧 means it has. It costs nothing: the value is parsed from the tail of the session's own transcript file on disk — no API call, no token spend. See [Prompt-cache freshness](#prompt-cache-freshness).
+It is the time and date of the last turn in **this** session that read or wrote the prompt cache, so you can tell at a glance whether your next message still rides the cached prefix. 🧊 means the TTL has not lapsed, 💧 means it has. The date is shown alongside the clock because a session you resume tomorrow would otherwise display a bare time that reads as today. It costs nothing: the value is parsed from the tail of the session's own transcript file on disk — no API call, no token spend. See [Prompt-cache freshness](#prompt-cache-freshness).
 
 ### Which timezone is the cache time in, and can I get a 12-hour clock?
 
@@ -542,7 +542,7 @@ The zone is your machine's local one by default. To pin it elsewhere, set `CLAUD
 }
 ```
 
-The clock is always 24-hour `HH:MM` regardless of locale — deliberate, so the statusline width stays stable. For a 12-hour clock, change the `'en-GB'` locale in `formatCacheSegment()` to `undefined`.
+Both the clock and the date follow that zone, so they cannot disagree across a midnight boundary. The clock is always 24-hour `HH:MM` regardless of locale — deliberate, so the statusline width stays stable. For a 12-hour clock, change the `'en-GB'` locale in `formatCacheSegment()` to `undefined`; to drop the date, remove `${date}` from the same function's return.
 
 ### What if my session expires?
 
